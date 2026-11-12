@@ -72,6 +72,52 @@ def _grid(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vector(args: argparse.Namespace) -> int:
+    import json
+
+    from .grid import GridError
+    from .vector import convert
+
+    try:
+        described = convert(
+            args.source,
+            args.output,
+            u=args.u,
+            v=args.v,
+            direction=args.direction,
+            magnitude=args.magnitude,
+            convention=args.convention,
+            frame=args.frame,
+            time=args.time,
+            time_index=args.time_index,
+            level=args.level,
+            level_index=args.level_index,
+            nodata=args.nodata,
+            target_epsg=args.target_epsg,
+            resolution=args.resolution,
+            driver=args.driver,
+            components=args.components,
+        )
+    except GridError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(described, indent=2))
+    return 0
+
+
+def _slice_options(parser: argparse.ArgumentParser) -> None:
+    when = parser.add_mutually_exclusive_group()
+    when.add_argument("--time", help="The time step, as an ISO 8601 stamp on the axis")
+    when.add_argument("--time-index", type=int, help="The time step, as an index")
+    where = parser.add_mutually_exclusive_group()
+    where.add_argument("--level", type=float, help="The vertical level, as a coordinate value")
+    where.add_argument("--level-index", type=int, help="The vertical level, as an index")
+    parser.add_argument("--nodata", type=float, help="Replace the variable's declared fill as the output's nodata")
+    parser.add_argument("--target-epsg", type=int, help="Reproject to this EPSG code (default: keep the source grid)")
+    parser.add_argument("--resolution", type=float, help="Output pixel size, in the target CRS's units")
+    parser.add_argument("--driver", choices=["COG", "GTiff"], default="COG", help="Output format (default: COG)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cf2ogc", description="CF-NetCDF to OGC-ready rasters")
     parser.add_argument("--version", action="version", version=f"cf2ogc {__version__}")
@@ -95,17 +141,29 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("source", help="Input NetCDF path or OPeNDAP URL")
     g.add_argument("variable", help="The variable to write")
     g.add_argument("-o", "--output", required=True, help="Output raster")
-    when = g.add_mutually_exclusive_group()
-    when.add_argument("--time", help="The time step, as an ISO 8601 stamp on the axis")
-    when.add_argument("--time-index", type=int, help="The time step, as an index")
-    where = g.add_mutually_exclusive_group()
-    where.add_argument("--level", type=float, help="The vertical level, as a coordinate value")
-    where.add_argument("--level-index", type=int, help="The vertical level, as an index")
-    g.add_argument("--nodata", type=float, help="Replace the variable's declared fill as the output's nodata")
-    g.add_argument("--target-epsg", type=int, help="Reproject to this EPSG code (default: keep the source grid)")
-    g.add_argument("--resolution", type=float, help="Output pixel size, in the target CRS's units")
-    g.add_argument("--driver", choices=["COG", "GTiff"], default="COG", help="Output format (default: COG)")
+    _slice_options(g)
     g.set_defaults(func=_grid)
+
+    w = sub.add_parser(
+        "vector",
+        help="Write one time step and vertical level of a vector field as u, v and speed bands; print its description",
+    )
+    w.add_argument("source", help="Input NetCDF path or OPeNDAP URL")
+    w.add_argument("-o", "--output", required=True, help="Output raster")
+    w.add_argument("--u", help="The u (eastward or grid x) component variable")
+    w.add_argument("--v", help="The v (northward or grid y) component variable")
+    w.add_argument("--direction", help="A direction variable (clockwise from north), instead of u and v")
+    w.add_argument("--magnitude", help="The magnitude variable that goes with --direction")
+    w.add_argument("--convention", choices=["from", "to"], help="The direction's convention, when its attributes do not say")
+    w.add_argument("--frame", choices=["earth", "grid"], help="The u/v components' axes, when their standard names do not say")
+    w.add_argument(
+        "--components",
+        choices=["grid", "earth"],
+        default="grid",
+        help="Turn the components into the output grid's axes (grid, the default) or keep them eastward/northward",
+    )
+    _slice_options(w)
+    w.set_defaults(func=_vector)
     return parser
 
 
