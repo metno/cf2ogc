@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (Python ${{ matrix.python }}${{ matrix.numba && ', numba' || '' }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            numba: false
+          - python: "3.12"
+            numba: true
+          - python: "3.13"
+            numba: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # rasterio and netCDF4 wheels carry their own GDAL and HDF5, so no
+      # system packages are needed.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test${{ matrix.numba && ',numba' || '' }}]"
+      - name: Show environment
+        run: python -c "import cf2ogc, numpy, xarray, rasterio; from cf2ogc.points import _NUMBA_AVAILABLE; print('cf2ogc', cf2ogc.__version__, '| numpy', numpy.__version__, '| xarray', xarray.__version__, '| rasterio', rasterio.__version__, '| numba', _NUMBA_AVAILABLE)"
+      - name: Run tests
+        run: python -m pytest -q -rs
+      - name: Command line
+        run: cf2ogc --version
+
+  package:
+    name: packaging metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      # Catches a malformed pyproject or an unreadable README before anyone
+      # tries to install the package.
+      - name: Build and check the distribution
+        run: |
+          python -m build
+          python -m twine check dist/*
