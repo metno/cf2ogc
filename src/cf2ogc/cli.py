@@ -46,6 +46,32 @@ def _points(args: argparse.Namespace) -> int:
     return 0
 
 
+def _grid(args: argparse.Namespace) -> int:
+    import json
+
+    from .grid import GridError, convert
+
+    try:
+        described = convert(
+            args.source,
+            args.variable,
+            args.output,
+            time=args.time,
+            time_index=args.time_index,
+            level=args.level,
+            level_index=args.level_index,
+            nodata=args.nodata,
+            target_epsg=args.target_epsg,
+            resolution=args.resolution,
+            driver=args.driver,
+        )
+    except GridError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(described, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cf2ogc", description="CF-NetCDF to OGC-ready rasters")
     parser.add_argument("--version", action="version", version=f"cf2ogc {__version__}")
@@ -61,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override processing.implementation (the command line's default is fast)",
     )
     p.set_defaults(func=_points)
+
+    g = sub.add_parser(
+        "grid",
+        help="Write one time step and vertical level of a gridded CF variable as a COG; print its description",
+    )
+    g.add_argument("source", help="Input NetCDF path or OPeNDAP URL")
+    g.add_argument("variable", help="The variable to write")
+    g.add_argument("-o", "--output", required=True, help="Output raster")
+    when = g.add_mutually_exclusive_group()
+    when.add_argument("--time", help="The time step, as an ISO 8601 stamp on the axis")
+    when.add_argument("--time-index", type=int, help="The time step, as an index")
+    where = g.add_mutually_exclusive_group()
+    where.add_argument("--level", type=float, help="The vertical level, as a coordinate value")
+    where.add_argument("--level-index", type=int, help="The vertical level, as an index")
+    g.add_argument("--nodata", type=float, help="Replace the variable's declared fill as the output's nodata")
+    g.add_argument("--target-epsg", type=int, help="Reproject to this EPSG code (default: keep the source grid)")
+    g.add_argument("--resolution", type=float, help="Output pixel size, in the target CRS's units")
+    g.add_argument("--driver", choices=["COG", "GTiff"], default="COG", help="Output format (default: COG)")
+    g.set_defaults(func=_grid)
     return parser
 
 

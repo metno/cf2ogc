@@ -2,12 +2,16 @@
 
 CF-compliant NetCDF in, rasters an OGC service (WMS, WCS) can serve out.
 
-Version 0.1.0 has one converter, `cf2ogc.points`. It takes a point cloud stored
-along a single `point` dimension and grids it onto a regular raster, written as
-a tiled, LZW-compressed Float32 GeoTIFF with internal overviews. Airborne
-hyperspectral (HySpex) point clouds are the first use, but the code has nothing
-HySpex-specific in it: any NetCDF with `X`, `Y` and value variables along
-`point` works.
+Two converters:
+
+- `cf2ogc.points` takes a point cloud stored along a single `point` dimension
+  and grids it onto a regular raster, written as a tiled, LZW-compressed
+  Float32 GeoTIFF with internal overviews. Airborne hyperspectral (HySpex)
+  point clouds are the first use, but the code has nothing HySpex-specific in
+  it: any NetCDF with `X`, `Y` and value variables along `point` works.
+- `cf2ogc.grid` takes a gridded CF variable, (y, x) with an optional time and
+  an optional vertical dimension, and writes one time step at one vertical
+  level as a Cloud Optimized GeoTIFF, with a description of what it wrote.
 
 Licence: GPL-3.0-or-later (see `LICENSE`).
 © 2026 Norwegian Meteorological Institute (MET Norway).
@@ -15,13 +19,95 @@ Licence: GPL-3.0-or-later (see `LICENSE`).
 ## Install
 
 ```sh
-pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.1.0"
+pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.2.0"
 # with the numba JIT accumulators used by the fast implementation:
-pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.1.0"
+pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.2.0"
+# with what cf2ogc.grid needs besides GDAL's Python bindings:
+pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.2.0"
 ```
 
 Dependencies: numpy, xarray, dask, netCDF4, rasterio, PyYAML; numba is optional.
+`cf2ogc.grid` also needs GDAL's own Python bindings (`osgeo`), which come with
+the system's GDAL (`apt install python3-gdal`, conda's `gdal`) rather than from
+a wheel, and pyproj (the `grid` extra).
 Python 3.10 or newer.
+
+## Gridded fields: `cf2ogc.grid`
+
+```python
+from cf2ogc.grid import convert
+
+described = convert(
+    "ocean_model.nc",            # a path, an OPeNDAP URL or an open xarray Dataset
+    "temp",
+    "temp_20240101T06_10m.tif",
+    time="2024-01-01T06:00:00Z", # or time_index=1
+    level=10.0,                  # or level_index=1, in the axis' own units
+)
+```
+
+The input is one CF variable whose last two dimensions are the grid (y, x),
+optionally preceded by a time dimension and a vertical one. Any other leading
+dimension (an ensemble member, a spectral band) is refused. Nothing is
+averaged or picked for you: an axis with more than one value must be selected,
+by value or by index; an axis of one value is taken as it is.
+
+**Axes are found by CF attributes first.** Time: `axis = "T"` or
+`standard_name = "time"`, then the names `time` and `t`. Vertical: `axis = "Z"`,
+`positive` (`up`/`down`), a vertical `standard_name` (`depth`, `height`,
+`altitude`, `air_pressure`, `model_level_number`, the dimensionless
+`ocean_*_coordinate` / `atmosphere_*_coordinate`), pressure units, and only
+then a name such as `depth`, `lev` or `plev`. A dimensionless coordinate
+(sigma, s-levels, hybrid) is reported with `parametric: true`: its values are
+model levels, not metres.
+
+**Georeferencing, best first:** a CF `grid_mapping` variable that exists plus
+regular 1-D projection axes (written as they are, no resampling; axes in km
+are converted); regular 1-D lon/lat axes (EPSG:4326, no resampling); 2-D
+lon/lat arrays, a curvilinear grid, warped through GDAL geolocation arrays
+(nearest neighbour) to Web Mercator unless `target_epsg` says otherwise. The
+CRS is read from `crs_wkt`, `spatial_ref`, `proj4_string`, then the CF
+parameters, and given its EPSG code when one can be proven.
+
+`geoloc_convention` sets GDAL's `GEOREFERENCING_CONVENTION` for a curvilinear
+grid. Left unset, GDAL reads each lon/lat as the corner of its cell
+(`TOP_LEFT_CORNER`), which puts the output half a cell towards increasing row
+and column, since CF coordinates are cell centres; `PIXEL_CENTER` reads them
+as CF means them.
+
+**Values** are read in physical units (packing undone), non-finite values
+become the nodata (the variable's `_FillValue` or `missing_value`, else
+-9999, or `nodata=`), and the output is Float32. A read that fails is retried
+twice with a growing pause (2 s, 4 s), since a remote OPeNDAP server drops
+connections.
+
+**The description** returned (and printed by the command line):
+
+```text
+path, driver, width, height, crs_wkt, epsg, geotransform,
+bounds [minx, miny, maxx, maxy] in the output CRS, resolution, reprojected,
+georeferencing (how the grid was placed),
+bands: [{band, variable, long_name, standard_name, units, dtype, nodata,
+         valid_range (unpacked), value_classes}],
+time:  {dim, index, value (ISO 8601)} or null,
+level: {dim, index, value, units, positive, standard_name, parametric} or null
+```
+
+`value_classes` is a legend for a categorical variable, from `flag_values` /
+`flag_meanings`, from `flag_meanings` with a `valid_min`/`valid_max` that
+accounts for every meaning, or from a `long_name` such as
+`"-1: ocean, 0: snow free, 1: snow"`: `[low, high, label, [r, g, b]]` per class.
+
+**Many slices of one field.** `GridField(ds, variable)` resolves the axes and
+the grid once; `field.convert(path, time_index=i, level_index=k)` writes each
+slice, and every slice of a warp lands on one target grid. `field.read(...)`
+and `field.write(values, path, ...)` split the two steps, for a caller that
+reads the values elsewhere. `driver="GTiff"` with `creation_options` writes a
+plain GeoTIFF instead of a COG.
+
+Errors: `cf2ogc.grid.SourceError` (the source cannot be converted as asked),
+`ReadError` (it could not be opened or read), `ConversionError` (GDAL could not
+produce the grid), all `GridError`.
 
 ## The input
 
@@ -114,7 +200,12 @@ and NFS mounts).
 ```sh
 cf2ogc points config.yaml -i cloud.nc -o cloud_Z.tif
 cf2ogc points config.yaml --implementation classic
+cf2ogc grid ocean_model.nc temp -o temp.tif --time 2024-01-01T06:00:00Z --level 10
+cf2ogc grid snow.nc snow_probability -o snow.tif --time-index 0 --target-epsg 3035
 ```
+
+`cf2ogc grid` prints the description as JSON; a selection that is not on an
+axis exits with status 2.
 
 The command line fills in its own defaults for keys the file leaves out:
 `implementation: fast`, `chunk_size: 1000000`, `tile_size: 80`,
@@ -133,6 +224,10 @@ runs both implementations on one file and writes their times to
 ## Development
 
 ```sh
-pip install -e ".[test,numba]"
+pip install -e ".[test,numba,grid]"
 pytest -q
+```
+
+The grid tests skip themselves when `osgeo` is missing; CI runs them in a job
+with the system's GDAL (`.github/workflows/ci.yml`).
 ```
