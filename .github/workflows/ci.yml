@@ -42,6 +42,28 @@ jobs:
       - name: Command line
         run: cf2ogc --version
 
+  grid:
+    # cf2ogc.grid needs GDAL's own Python bindings, which have no wheel: use
+    # the system's (GDAL 3.8 on Ubuntu 24.04). They are built against NumPy 1,
+    # so NumPy stays below 2 in this job.
+    name: tests with the system GDAL (cf2ogc.grid)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gdal python3-venv
+          python3 -m venv --system-site-packages .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          echo "numpy<2" > constraints.txt
+          PIP_CONSTRAINT=constraints.txt python -m pip install -e ".[test,grid]"
+      - name: Show environment
+        run: .venv/bin/python -c "from osgeo import gdal; import numpy, pyproj, cf2ogc; print('cf2ogc', cf2ogc.__version__, '| gdal', gdal.__version__, '| numpy', numpy.__version__, '| pyproj', pyproj.__version__)"
+      - name: Run tests
+        run: .venv/bin/python -m pytest -q -rs
+
   package:
     name: packaging metadata
     runs-on: ubuntu-24.04

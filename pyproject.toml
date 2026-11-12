@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cf2ogc"
-version = "0.1.0"
-description = "CF-compliant NetCDF to rasters an OGC service can serve (point clouds gridded to GeoTIFF)"
+version = "0.2.0"
+description = "CF-compliant NetCDF to rasters an OGC service can serve (gridded fields and point clouds to GeoTIFF)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Massimo Di Stefano", email = "massimods@met.no" }]
-keywords = ["netcdf", "cf-conventions", "point-cloud", "geotiff", "ogc", "wms", "wcs", "hyspex"]
+keywords = ["netcdf", "cf-conventions", "point-cloud", "cog", "geotiff", "ogc", "wms", "wcs", "hyspex"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: GIS",
@@ -29,7 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 # The JIT accumulators of the fast implementation (parallel_mode numba).
 numba = ["numba>=0.58"]
-test = ["pytest>=8"]
+# cf2ogc.grid; it also needs GDAL's Python bindings (osgeo) from the system's GDAL.
+grid = ["pyproj>=3.4"]
+test = ["pytest>=8", "cftime>=1.6"]
 
 [project.scripts]
 cf2ogc = "cf2ogc.cli:main"
