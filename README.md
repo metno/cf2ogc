@@ -12,6 +12,9 @@ Two converters:
 - `cf2ogc.grid` takes a gridded CF variable, (y, x) with an optional time and
   an optional vertical dimension, and writes one time step at one vertical
   level as a Cloud Optimized GeoTIFF, with a description of what it wrote.
+- `cf2ogc.vector` takes a vector field (u and v components, or a direction and
+  a magnitude) on the same kind of grid and writes one time step at one
+  vertical level as a 3-band raster: u, v and speed.
 
 Licence: GPL-3.0-or-later (see `LICENSE`).
 © 2026 Norwegian Meteorological Institute (MET Norway).
@@ -19,11 +22,11 @@ Licence: GPL-3.0-or-later (see `LICENSE`).
 ## Install
 
 ```sh
-pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.2.0"
+pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.3.0"
 # with the numba JIT accumulators used by the fast implementation:
-pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.2.0"
+pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.3.0"
 # with what cf2ogc.grid needs besides GDAL's Python bindings:
-pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.2.0"
+pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.3.0"
 ```
 
 Dependencies: numpy, xarray, dask, netCDF4, rasterio, PyYAML; numba is optional.
@@ -108,6 +111,48 @@ plain GeoTIFF instead of a COG.
 Errors: `cf2ogc.grid.SourceError` (the source cannot be converted as asked),
 `ReadError` (it could not be opened or read), `ConversionError` (GDAL could not
 produce the grid), all `GridError`.
+
+## Vector fields: `cf2ogc.vector`
+
+```python
+from cf2ogc.vector import convert
+
+described = convert(
+    "https://thredds.met.no/thredds/dodsC/fou-hi/norkystv3_800m_m00_be",
+    "current_0m.tif",
+    u="u_eastward", v="v_northward",
+    time="2026-11-15T12:00:00Z", level=0.0,
+    target_epsg=3857,
+)
+```
+
+The output has three Float32 bands, always in this order: **1 = u**, **2 = v**,
+**3 = speed** (`sqrt(u² + v²)`), one nodata on all three (a pixel where either
+component is missing is missing in every band). Time, level, grid and warp work
+as in `cf2ogc.grid`; `VectorField(ds, u=..., v=...)` is the many-slices form.
+
+**Direction and magnitude.** `convert(src, out, direction="thq", magnitude="hs", ...)`
+converts a bearing (degrees or radians, clockwise from north) and a magnitude
+to eastward/northward components. Whether the bearing is where the flow comes
+*from* or goes *to* is read from CF: the `standard_name` (`*_from_direction`,
+`*_to_direction`), else the `long_name`; `convention="from"|"to"` overrides it,
+and a variable that says neither is refused rather than guessed. With a "to"
+bearing θ and magnitude m: `u = m·sin θ`, `v = m·cos θ`; "from" points the other
+way. The convention is recorded in the description (`vector.direction_convention`)
+and in the raster (`CF2OGC_DIRECTION_CONVENTION`).
+
+**Which axes u and v are in.** `eastward_*`/`northward_*` components are
+geographic, but an arrow is drawn along the raster's grid, and on a projected
+grid "east" is not "right" (on a polar stereographic grid they differ by the
+distance from the central meridian). With `components="grid"` (the default)
+each vector is turned into the output grid's axes, its length kept; with
+`components="earth"` the bands stay eastward/northward. On EPSG:3857 (conformal,
+north up everywhere) the two are the same, which is why a service that draws
+arrows with MapServer's `UVRASTER` (it reads the bands in its own pixel axes)
+should write vector rasters there. Grid-relative inputs (`x_*`/`y_*` standard
+names, or `frame="grid"`) are written only onto their own grid. The choice is
+recorded in the description (`vector.components`, `vector.rotated`) and in the
+raster's metadata (`CF2OGC_COMPONENTS`, band descriptions `u`, `v`, `speed`).
 
 ## The input
 
@@ -204,8 +249,13 @@ cf2ogc grid ocean_model.nc temp -o temp.tif --time 2024-01-01T06:00:00Z --level 
 cf2ogc grid snow.nc snow_probability -o snow.tif --time-index 0 --target-epsg 3035
 ```
 
-`cf2ogc grid` prints the description as JSON; a selection that is not on an
-axis exits with status 2.
+```sh
+cf2ogc vector ocean_model.nc -o current.tif --u u_eastward --v v_northward --time-index 0 --level 0
+cf2ogc vector waves.nc -o waves.tif --direction thq --magnitude hs --time-index 0
+```
+
+`cf2ogc grid` and `cf2ogc vector` print the description as JSON; a selection
+that is not on an axis exits with status 2.
 
 The command line fills in its own defaults for keys the file leaves out:
 `implementation: fast`, `chunk_size: 1000000`, `tile_size: 80`,
