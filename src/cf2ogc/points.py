@@ -760,21 +760,8 @@ def process_point_cloud_fast(config, input_path, output_path, *, cancel: Optiona
                 method_code = {"mean": 0, "count": 1, "max": 2, "min": 3}.get(method)
                 if method_code is None:
                     continue
-                if i == 0 and band_idx == 0:
-                    # Warm up JIT on first pass to avoid skewing timings.
-                    _accumulate_tiles_numba_parallel(
-                        tile_starts[:1],
-                        tile_counts[:1],
-                        rows_sorted[:1],
-                        cols_sorted[:1],
-                        values_sorted[:1],
-                        width,
-                        grid_sums[band_idx].ravel(),
-                        grid_counts[band_idx].ravel(),
-                        grid_mins[band_idx].ravel(),
-                        grid_maxs[band_idx].ravel(),
-                        method_code,
-                    )
+                # No separate JIT warm-up call: any call writes into the
+                # output grids, so a warm-up would count its points twice.
                 _accumulate_tiles_numba_parallel(
                     tile_starts,
                     tile_counts,

@@ -22,11 +22,11 @@ Licence: GPL-3.0-or-later (see `LICENSE`).
 ## Install
 
 ```sh
-pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.3.0"
+pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.4.0"
 # with the numba JIT accumulators used by the fast implementation:
-pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.3.0"
+pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.4.0"
 # with what cf2ogc.grid needs besides GDAL's Python bindings:
-pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.3.0"
+pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.4.0"
 ```
 
 Dependencies: numpy, xarray, dask, netCDF4, rasterio, PyYAML; numba is optional.
@@ -63,6 +63,10 @@ by value or by index; an axis of one value is taken as it is.
 then a name such as `depth`, `lev` or `plev`. A dimensionless coordinate
 (sigma, s-levels, hybrid) is reported with `parametric: true`: its values are
 model levels, not metres.
+
+**Times are decoded on coordinates only.** The time axis is read as dates; a
+data variable in CF time units (a drift product's start and end times, a
+duration in days) keeps the numbers the file holds and is written as such.
 
 **Georeferencing, best first:** a CF `grid_mapping` variable that exists plus
 regular 1-D projection axes (written as they are, no resampling; axes in km
