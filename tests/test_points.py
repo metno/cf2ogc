@@ -121,6 +121,41 @@ def test_numba_parallel_path_smoke(tmp_path):
     assert out.shape[0] == 1
 
 
+def test_numba_parallel_matches_classic_across_chunks(tmp_path):
+    # Points of the same cells arrive in several chunks, so a point
+    # accumulated twice in one chunk shifts the cell's mean.
+    if not _NUMBA_AVAILABLE:
+        pytest.skip("numba not installed")
+    rng = np.random.default_rng(7)
+    n = 400
+    nc_path = tmp_path / "input.nc"
+    xr.Dataset(
+        {
+            "X": ("point", rng.uniform(0.0, 4.0, n).astype(np.float32)),
+            "Y": ("point", rng.uniform(0.0, 4.0, n).astype(np.float32)),
+            "value": ("point", rng.uniform(0.0, 100.0, n).astype(np.float32)),
+        }
+    ).to_netcdf(nc_path)
+    bands = [{"variable": "value", "method": "mean", "nodata_val": -9999}]
+    config = {
+        "grid": {"resolution": 1.0, "bounds_strategy": "rounded"},
+        "processing": {"chunk_size": 50, "implementation": "classic", "extent_engine": "serial"},
+        "output_bands": bands,
+    }
+    classic_out = tmp_path / "classic.tif"
+    process_point_cloud(copy.deepcopy(config), str(nc_path), str(classic_out))
+
+    config["processing"].update(
+        implementation="fast", parallel_mode="numba", parallel_workers=2, tile_size=2
+    )
+    numba_out = tmp_path / "numba.tif"
+    process_point_cloud_fast(config, str(nc_path), str(numba_out))
+
+    classic = _read_tif(classic_out)
+    numba = _read_tif(numba_out)
+    np.testing.assert_allclose(numba, classic, rtol=1e-6)
+
+
 def test_overview_factors_only_for_large_rasters():
     assert _overview_factors(255, 255) == []
     assert _overview_factors(512, 512) == [2]
