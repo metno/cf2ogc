@@ -83,12 +83,24 @@ def open_source(path: str) -> Any:
 
     ``decode_coords="all"`` keeps grid_mapping and bounds variables reachable,
     and ``mask_and_scale=True`` hands back physical values with fill as NaN.
+    CF times are decoded on the coordinates only: a data variable in time units
+    is converted as the number it holds.
     """
 
     import xarray as xr
 
+    from .io import decode_coordinate_times
+
     try:
-        return xr.open_dataset(path, decode_coords="all", mask_and_scale=True)
+        return decode_coordinate_times(
+            xr.open_dataset(
+                path,
+                decode_coords="all",
+                mask_and_scale=True,
+                decode_times=False,
+                decode_timedelta=False,
+            )
+        )
     except Exception as exc:
         raise ReadError(f"Unable to open NetCDF source: {exc}") from exc
 
