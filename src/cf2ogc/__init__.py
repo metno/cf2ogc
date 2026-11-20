@@ -5,4 +5,4 @@
 
 """cf2ogc: CF-compliant NetCDF in, rasters an OGC service can serve out."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
