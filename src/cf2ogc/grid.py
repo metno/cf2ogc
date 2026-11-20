@@ -15,16 +15,22 @@ collapsed: an axis with more than one value must be selected explicitly.
 
 Axes are found by their CF attributes (``axis``, ``standard_name``,
 ``positive``, ``units``) before their names. Georeferencing is resolved in
-three tiers, best first, by ``resolve_georeferencing``:
+four tiers, best first, by ``resolve_georeferencing``:
 
 1. A CF ``grid_mapping`` container variable that actually exists, plus regular
    1D projection axes - the grid is then described by a six-number geotransform
    and no resampling is needed at all.
 2. Regular 1D lat/lon axes - the same, in EPSG:4326.
-3. 2D lat/lon coordinate arrays (a curvilinear grid), used as a GDAL
+3. 2D lat/lon arrays plus a ``grid_mapping`` container that exists but no
+   projection axes: the lat/lon are projected into the container's CRS and,
+   when they land on evenly spaced x/y (every cell centre within a hundredth of
+   a cell), the grid gets its geotransform back. The container may be CF or a
+   recognised non-CF form (a UTM zone named in its attributes or its name, as
+   the NORCE MODIS snow cover product for Svalbard writes it).
+4. 2D lat/lon coordinate arrays (a curvilinear grid), used as a GDAL
    geolocation array and warped per pixel.
 
-Tier 3 exists because real products routinely reference a grid_mapping variable
+Tier 4 exists because real products routinely reference a grid_mapping variable
 they never actually write - the SIOS SnowPilot SLSTR aggregation is one, and its
 ``xc``/``yc`` axes are in km despite claiming metres, with ``yc`` negated
 relative to true projected y. For such a source the lat/lon arrays are the
@@ -163,6 +169,10 @@ class GridRef:
     lon_var: str = ""
     lat_var: str = ""
     source: str = ""
+    # Set when the geotransform was recovered from 2D lat/lon: the largest
+    # distance, in the CRS's linear unit, between a projected lat/lon and the
+    # cell centre the geotransform puts there.
+    max_residual: float | None = None
 
     @property
     def is_geoloc(self) -> bool:
@@ -356,6 +366,145 @@ def _srs_from_crs_variable(crs_var: Any) -> Any | None:
     return None
 
 
+# A UTM zone as producers spell it outside CF: "UTM Zone 33N", "UTMZ33N",
+# "utm_33n", or a bare "33N" in a zone attribute.
+_UTM_IN_TEXT = re.compile(r"utm[\s_-]*(?:zone|z)?[\s_-]*(\d{1,2})\s*([ns])?(?![a-z0-9])", re.IGNORECASE)
+_UTM_ZONE_VALUE = re.compile(r"^\s*(\d{1,2})\s*([ns])?\s*$", re.IGNORECASE)
+_UTM_ZONE_KEYS = ("utm_zone_number", "utm_zone", "zone")
+_WGS84_ELLIPSOID = (6378137.0, 298.257223563)
+
+
+def _srs_from_nonstandard_mapping(crs_var: Any, name: str = "", latitudes: Any = None) -> Any | None:
+    """Build a spatial reference from a grid_mapping container CF cannot read.
+
+    Recognises a UTM zone given in a zone attribute (``utm_zone_number``), in
+    ``grid_mapping_name`` or in the container's own name. The NORCE MODIS snow
+    cover product for Svalbard writes ``grid_mapping_name = "UTM Zone 33N"``,
+    ``utm_zone_number = "33N"`` and a variable named ``UTMZ33N``, none of which
+    PROJ reads. A zone without a hemisphere letter takes the hemisphere of
+    ``latitudes`` (their median). The ellipsoid is WGS84 unless
+    ``semi_major_axis`` and ``inverse_flattening`` say otherwise. Returns None
+    for anything else.
+    """
+
+    import numpy as np
+    from osgeo import osr
+
+    attrs = {str(k): v for k, v in crs_var.attrs.items()}
+    zone: int | None = None
+    hemisphere = ""
+    for key in _UTM_ZONE_KEYS:
+        match = _UTM_ZONE_VALUE.match(str(attrs.get(key, "") or ""))
+        if match:
+            zone, hemisphere = int(match.group(1)), (match.group(2) or "").upper()
+            break
+    if zone is None:
+        for text in (str(attrs.get("grid_mapping_name", "") or ""), name):
+            match = _UTM_IN_TEXT.search(text)
+            if match:
+                zone, hemisphere = int(match.group(1)), (match.group(2) or "").upper()
+                break
+    if zone is None or not 1 <= zone <= 60:
+        return None
+    if not hemisphere:
+        if latitudes is None:
+            return None
+        values = np.asarray(latitudes, dtype="float64")
+        values = values[np.isfinite(values)]
+        if not values.size:
+            return None
+        hemisphere = "N" if float(np.median(values)) >= 0.0 else "S"
+
+    try:
+        semi_major = float(attrs.get("semi_major_axis", _WGS84_ELLIPSOID[0]))
+        inverse_flattening = float(attrs.get("inverse_flattening", _WGS84_ELLIPSOID[1]))
+    except (TypeError, ValueError):
+        return None
+    srs = osr.SpatialReference()
+    if np.allclose((semi_major, inverse_flattening), _WGS84_ELLIPSOID, rtol=0.0, atol=1e-6):
+        srs.ImportFromEPSG((32600 if hemisphere == "N" else 32700) + zone)
+        return srs
+    south = " +south" if hemisphere == "S" else ""
+    if srs.ImportFromProj4(
+        f"+proj=utm +zone={zone}{south} +a={semi_major} +rf={inverse_flattening} +units=m +no_defs"
+    ) != 0:
+        return None
+    return srs
+
+
+# Tier 3 accepts a geotransform recovered from 2D lat/lon when every projected
+# lat/lon lies within this fraction of a cell of the centre it is given. A
+# float32 lat/lon carries about a metre of rounding at high latitudes, which
+# is a fiftieth of the residual this allows on a 500 m grid.
+_PROJECTED_LONLAT_TOLERANCE = 0.01
+# How many lat/lon points the regularity check projects at most. A larger grid
+# is checked on evenly strided rows and columns, the last ones always included.
+_PROJECTED_LONLAT_SAMPLES = 1_000_000
+
+
+def _sample_indices(count: int, stride: int) -> Any:
+    import numpy as np
+
+    indices = np.arange(0, count, stride)
+    if indices[-1] != count - 1:
+        indices = np.append(indices, count - 1)
+    return indices
+
+
+def _geotransform_from_lonlat(
+    lon: Any, lat: Any, srs: Any, tolerance: float = _PROJECTED_LONLAT_TOLERANCE
+) -> tuple[tuple[float, float, float, float, float, float], float] | None:
+    """Recover the geotransform of a regular grid from its 2D lat/lon.
+
+    The lat/lon are projected into ``srs`` and fitted, axis by axis, with
+    x = x0 + dx * column and y = y0 + dy * row (least squares). The fit is
+    accepted only when no projected point is further than ``tolerance`` of the
+    smaller cell size from it, which also refuses a grid rotated in ``srs``.
+    Returns (geotransform, largest residual) or None.
+    """
+
+    import numpy as np
+    from pyproj import CRS, Transformer
+
+    lon = np.asarray(lon, dtype="float64")
+    lat = np.asarray(lat, dtype="float64")
+    if lon.ndim != 2 or lon.shape != lat.shape or min(lon.shape) < 2:
+        return None
+    height, width = lon.shape
+    stride = max(1, int(np.ceil(np.sqrt(height * width / _PROJECTED_LONLAT_SAMPLES))))
+    rows = _sample_indices(height, stride)
+    cols = _sample_indices(width, stride)
+    lon = lon[np.ix_(rows, cols)]
+    lat = lat[np.ix_(rows, cols)]
+    if not (np.isfinite(lon).all() and np.isfinite(lat).all()):
+        return None
+
+    try:
+        transformer = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_wkt(srs.ExportToWkt()), always_xy=True)
+        x, y = transformer.transform(lon, lat)
+    except Exception:
+        return None
+    x = np.asarray(x, dtype="float64")
+    y = np.asarray(y, dtype="float64")
+    if not (np.isfinite(x).all() and np.isfinite(y).all()):
+        return None
+
+    dx, x0 = np.polyfit(cols.astype("float64"), x.mean(axis=0), 1)
+    dy, y0 = np.polyfit(rows.astype("float64"), y.mean(axis=1), 1)
+    cell = min(abs(dx), abs(dy))
+    if not cell:
+        return None
+    residual = max(
+        float(np.abs(x - (x0 + dx * cols[np.newaxis, :])).max()),
+        float(np.abs(y - (y0 + dy * rows[:, np.newaxis])).max()),
+    )
+    if residual > tolerance * cell:
+        return None
+    # The fit is of cell centres; a geotransform starts at the first cell's edge.
+    geotransform = (float(x0 - dx / 2.0), float(dx), 0.0, float(y0 - dy / 2.0), 0.0, float(dy))
+    return geotransform, residual
+
+
 def _grid_mapping_name(ds: Any, variable: str) -> str:
     """Return the grid_mapping container referenced by a variable, if any."""
 
@@ -486,7 +635,8 @@ def _find_lonlat(ds: Any, variable: str = "") -> tuple[str, str]:
 def resolve_georeferencing(ds: Any, variable: str = "") -> GridRef:
     """Decide how to place a variable's pixels on the Earth.
 
-    Tries a real CRS first, then 1D lat/lon axes, then 2D geolocation arrays,
+    Tries a real CRS first, then 1D lat/lon axes, then 2D lat/lon that project
+    onto a regular grid in the grid_mapping's CRS, then 2D geolocation arrays,
     so a well-formed source is published without resampling and a malformed one
     still works.
     """
@@ -538,8 +688,32 @@ def resolve_georeferencing(ds: Any, variable: str = "") -> GridRef:
                 source="lonlat_axes",
             )
 
-    # Tier 3: 2D geolocation arrays, warped per pixel.
+    # Tier 3: 2D lat/lon that project onto a regular grid in the CRS of an
+    # existing grid_mapping container.
     lon_name, lat_name = _find_lonlat(ds, variable)
+    if crs_name:
+        crs_var = ds[crs_name]
+        srs = _srs_from_crs_variable(crs_var)
+        if srs is None:
+            srs = _srs_from_nonstandard_mapping(crs_var, crs_name, ds[lat_name].values)
+        if srs is not None:
+            fitted = _geotransform_from_lonlat(ds[lon_name].values, ds[lat_name].values, srs)
+            if fitted is not None:
+                gt, residual = fitted
+                epsg = _attach_authority(srs, str(ds.attrs.get("geospatial_bounds_crs", "") or ""))
+                return GridRef(
+                    kind="crs",
+                    srs_wkt=srs.ExportToWkt(),
+                    epsg=epsg,
+                    geotransform=gt,
+                    shape=shape,
+                    lon_var=lon_name,
+                    lat_var=lat_name,
+                    source=f"projected_lonlat:{crs_name}",
+                    max_residual=residual,
+                )
+
+    # Tier 4: 2D geolocation arrays, warped per pixel.
     if ds[lon_name].ndim != 2 or ds[lat_name].ndim != 2:
         raise SourceError(
             "Source has no usable georeferencing: no CF grid_mapping with regular "
