@@ -22,11 +22,11 @@ Licence: GPL-3.0-or-later (see `LICENSE`).
 ## Install
 
 ```sh
-pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.4.0"
+pip install "cf2ogc @ git+https://github.com/metno/cf2ogc@v0.5.0"
 # with the numba JIT accumulators used by the fast implementation:
-pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.4.0"
+pip install "cf2ogc[numba] @ git+https://github.com/metno/cf2ogc@v0.5.0"
 # with what cf2ogc.grid needs besides GDAL's Python bindings:
-pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.4.0"
+pip install "cf2ogc[grid] @ git+https://github.com/metno/cf2ogc@v0.5.0"
 ```
 
 Dependencies: numpy, xarray, dask, netCDF4, rasterio, PyYAML; numba is optional.
@@ -71,10 +71,28 @@ duration in days) keeps the numbers the file holds and is written as such.
 **Georeferencing, best first:** a CF `grid_mapping` variable that exists plus
 regular 1-D projection axes (written as they are, no resampling; axes in km
 are converted); regular 1-D lon/lat axes (EPSG:4326, no resampling); 2-D
-lon/lat arrays, a curvilinear grid, warped through GDAL geolocation arrays
+lon/lat arrays plus a `grid_mapping` variable that exists but no projection
+axes, when the lon/lat project onto a regular grid in that CRS (no
+resampling; see below); 2-D lon/lat arrays, a curvilinear grid, warped
+through GDAL geolocation arrays
 (nearest neighbour) to Web Mercator unless `target_epsg` says otherwise. The
 CRS is read from `crs_wkt`, `spatial_ref`, `proj4_string`, then the CF
 parameters, and given its EPSG code when one can be proven.
+
+**A regular grid known only by its lon/lat** gets its geotransform back. The
+lon/lat are projected into the `grid_mapping`'s CRS and fitted with
+x = x0 + dx·column, y = y0 + dy·row; the fit is kept when no cell centre is
+more than a hundredth of a cell from it (a rotated or irregular grid fails
+and keeps the geolocation path), and `GridRef.max_residual` reports the
+largest distance, in the CRS's unit. Grids over a million cells are checked
+on evenly strided rows and columns, the last ones included. Besides CF, a UTM
+zone written outside CF is recognised: in a zone attribute
+(`utm_zone_number = "33N"`), in `grid_mapping_name` (`"UTM Zone 33N"`) or in
+the variable's name (`UTMZ33N`), on WGS84 unless `semi_major_axis` and
+`inverse_flattening` say otherwise, the hemisphere taken from the latitudes
+when no letter gives it. The NORCE MODIS snow cover product for Svalbard is
+such a source: 931 × 1001 cells of 500 m in EPSG:32633, recovered within
+0.43 m. `georeferencing` in the description reads `projected_lonlat:<name>`.
 
 `geoloc_convention` sets GDAL's `GEOREFERENCING_CONVENTION` for a curvilinear
 grid. Left unset, GDAL reads each lon/lat as the corner of its cell
